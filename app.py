@@ -48,7 +48,7 @@ Return ONLY valid JSON (no markdown fences, no commentary) with this shape:
     {"type": "paragraph", "text": "...", "box_2d": [ymin,xmin,ymax,xmax]},
     {"type": "list_item", "text": "...", "box_2d": [ymin,xmin,ymax,xmax]},
     {"type": "table", "markdown": "| a | b |\\n|---|---|\\n| 1 | 2 |", "box_2d": [ymin,xmin,ymax,xmax]},
-    {"type": "figure", "caption": "short description or empty string", "box_2d": [ymin,xmin,ymax,xmax]}
+    {"type": "figure", "caption": "verbatim printed caption/label text, or empty string if none", "box_2d": [ymin,xmin,ymax,xmax]}
   ]
 }
 
@@ -64,7 +64,22 @@ Rules:
 - Use "figure" for any photo, chart, diagram, logo, or illustration.
   Do not use "figure" for plain text, even if stylized. Make the figure
   box_2d tight around just the visual (do not include surrounding text or
-  its caption).
+  its caption). This includes pie charts, bar charts, and graphs — even
+  when they sit in their own narrow column beside body text. Every visual
+  element on the page must get its own figure block; do not skip one
+  because the page is dense or the layout is multi-column.
+- If the figure has a printed caption or label near it (e.g. "Figure 1:
+  ..." or a title under a chart), copy that caption text VERBATIM into
+  "caption" — do not paraphrase it or invent your own description. If the
+  figure has no printed caption anywhere near it, use an empty string.
+- Do NOT merge multiple visually distinct paragraphs, headings, or list
+  items into a single block just because they sit close together with no
+  large vertical gap. Each numbered or lettered marker (e.g. "1)", "2)",
+  "a)", bullet symbols) starts a NEW block — either "heading" or
+  "list_item" — separate from the paragraph(s) that follow it, even when
+  there is no visible blank line before it. A page with two numbered
+  sections and two paragraphs must produce at least four text blocks, not
+  one block containing all of it.
 - Reproduce all text VERBATIM as best you can read it (this is OCR).
   Preserve the exact bracket characters used (e.g. plain [ ] must stay as
   [ ], do not convert to full-width brackets), and preserve line breaks
@@ -96,11 +111,17 @@ def render_page(doc, page_index, dpi=RENDER_DPI):
 
 
 def extract_json(raw_text):
-    """Gemini sometimes wraps JSON in fences despite instructions; strip them."""
+    """Gemini sometimes wraps JSON in fences despite instructions; strip them.
+    It also occasionally tacks on trailing whitespace/text after a otherwise
+    complete JSON object (json.loads rejects that outright with "Extra data"
+    instead of ignoring it), so parse with raw_decode and only take the
+    first valid JSON value, discarding anything after it."""
     cleaned = raw_text.strip()
     cleaned = re.sub(r"^```(json)?", "", cleaned).strip()
     cleaned = re.sub(r"```$", "", cleaned).strip()
-    return json.loads(cleaned)
+    decoder = json.JSONDecoder()
+    obj, _end_index = decoder.raw_decode(cleaned)
+    return obj
 
 
 def analyze_page(client, page_image):
@@ -113,6 +134,21 @@ def analyze_page(client, page_image):
     blocks = data.get("blocks", [])
     for block in blocks:
         block["bbox"] = normalize_box(block)
+
+    # DEBUG: print a one-line summary per block so we can see exactly what
+    # Gemini classified this page as, without needing to inspect the final
+    # rendered markdown. Remove once figure/segmentation issues are sorted.
+    print(f"--- analyze_page: {len(blocks)} block(s) ---")
+    for i, b in enumerate(blocks):
+        btype = b.get("type")
+        bbox = b.get("bbox")
+        if btype == "figure":
+            preview = f'caption={b.get("caption")!r} bbox={bbox}'
+        else:
+            text = (b.get("text") or b.get("markdown") or "")[:60]
+            preview = f'text={text!r} bbox={bbox}'
+        print(f"  [{i}] {btype}: {preview}")
+
     return blocks
 
 
@@ -244,9 +280,23 @@ def blocks_to_markdown(blocks, page_image, page_number):
                     float_style = "float:left;margin:4px 16px 10px 0;max-width:46%;"
                 else:
                     float_style = "display:block;margin:10px auto;max-width:70%;"
+                caption = _esc((block.get("caption") or "").strip())
+                caption_html = (
+                    f'<figcaption style="font-size:0.82em;color:#555;'
+                    f'font-style:italic;line-height:1.3;margin-top:4px;">'
+                    f'{caption}</figcaption>'
+                    if caption else ""
+                )
+                # Caption sits inside the same <figure> as the image, so it
+                # floats/positions as one unit and always stays attached to
+                # its image instead of drifting off as a separate paragraph.
                 parts.append(
+                    f'<figure style="{float_style}margin:4px 0 10px;">'
                     f'<img src="data:image/{fmt};base64,{b64}" '
-                    f'style="{float_style}height:auto;border-radius:2px;" />'
+                    f'style="display:block;width:100%;height:auto;'
+                    f'border-radius:2px;margin:0;" />'
+                    f'{caption_html}'
+                    f'</figure>'
                 )
 
     parts.append('<div style="clear:both;"></div></div>')
